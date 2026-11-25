@@ -1,0 +1,13 @@
+Seed,Type,Strategy,Total Nectar Collected,Travel Distance,Energy Consumption,Successful Hive Returns,Execution Time (s)
+0,Search-Based,A* + Nearest Flower,80,46,60,1,0.0
+0,Optimized,Hill Climbing,85,48,60,1,0.0554
+0,Optimized,Genetic Algorithm,85,48,60,1,0.5129
+0,Learning-Based,Q-Learning,80,50,60,1,0.3499
+1,Search-Based,A* + Nearest Flower,60,38,48,1,0.0
+1,Optimized,Hill Climbing,85,46,58,1,0.0569
+1,Optimized,Genetic Algorithm,85,46,58,1,0.5143
+1,Learning-Based,Q-Learning,75,48,58,1,0.3296
+2,Search-Based,A* + Nearest Flower,95,44,60,1,0.0
+2,Optimized,Hill Climbing,95,40,56,1,0.078
+2,Optimized,Genetic Algorithm,95,42,58,1,0.5903
+2,Learning-Based,Q-Learning,95,44,60,1,0.4556
