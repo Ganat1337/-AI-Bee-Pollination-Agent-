@@ -1,4 +1,5 @@
 numpy
 matplotlib
-pygame
+pygame-ce
 pandas
+ipykernel
