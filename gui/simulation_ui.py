@@ -1,277 +1,319 @@
 """
-Interactive simulation for the AI Bee Pollination Agent (put this file in gui/).
+gui/simulation_ui.py  -  Pygame window that shows the bee moving in the garden.
 
-Uses your real project code:
-    environment.garden.BeeGarden      -> the world (hive, obstacles, flowers, energy_limit, collect_cost)
-    search.astar.a_star_search        -> path planning, returns (path, cost)
+Run from the project root (the folder that has main.py):
+    python -m gui.simulation_ui
 
-Run from anywhere:
-    python gui/simulation_ui.py
-
-Panels: garden + path trail | energy over time | dashboard.
-Controls: Pause/Play, Restart (same garden), New garden, speed slider.
+Keys:
+    1 2 3 4     choose the strategy (A*, Hill Climbing, Genetic, Q-Learning)
+    SPACE       pause / play
+    R           restart the bee
+    UP / DOWN   faster / slower
+    N           next map (next seed)
+    ESC         quit
 """
-import math
-import os
-import random
-import sys
 
-# Make "environment" and "search" importable even when running `python gui/simulation_ui.py`
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation
-from matplotlib.gridspec import GridSpec
-from matplotlib.patches import Rectangle
-from matplotlib.widgets import Button, Slider
+import pygame
 
 from environment.garden import BeeGarden
-from search.astar import a_star_search
+from search.astar import build_distance_matrix
+from optimization import hill_climbing_strategy, genetic_algorithm_strategy
+from learning.q_learning import q_learning_strategy
+from evaluation.search_based import search_based_strategy
 
-GARDEN_KWARGS = dict(width=15, height=15, n_flowers=10)
-START_SEED = 0
+SIZE = 15
+N_FLOWERS = 10
+CELL = 40                    # size of one cell in pixels
+PANEL = 280                  # width of the info panel on the right
 
+# the strategies, same order as in evaluation/compare.py
+STRATEGIES = [
+    ("A* + Nearest Flower", search_based_strategy),
+    ("Hill Climbing", hill_climbing_strategy),
+    ("Genetic Algorithm", genetic_algorithm_strategy),
+    ("Q-Learning", q_learning_strategy),
+]
 
-# ----------------------------------------------------------------------------
-# Bee agent: greedy "nearest flower I can still afford, then get home"
-# ----------------------------------------------------------------------------
-class BeeAgent:
-    def __init__(self, garden):
-        self.g = garden
-        self.max_energy = float(garden.energy_limit)
-        self.energy = self.max_energy
-        self.collect_cost = float(getattr(garden, "collect_cost", 0))
-        self.pos = garden.hive
-        self.remaining = set(garden.flowers)
-        self.collected = []
-        self.plan = []
-        self.step_cost = 1.0
-        self.target = None
-        self.state = "Planning"
-        self.done = False
-        self.steps = 0
-        self.trail = [self.pos]
-        self.energy_hist = [self.energy]
-
-    def _route(self, a, b):
-        """(path without start, cost) or (None, None) if there is no usable path."""
-        if a == b:
-            return [], 0.0
-        try:
-            path, cost = a_star_search(self.g, a, b)
-        except Exception:
-            return None, None
-        if not path or cost is None or not math.isfinite(cost):
-            return None, None
-        path = list(path)
-        if path and path[0] == a:
-            path = path[1:]
-        return path, float(cost)
-
-    def _choose(self):
-        best = None
-        for f in self.remaining:
-            to_f, c1 = self._route(self.pos, f)
-            if to_f is None:
-                continue
-            back, c2 = self._route(f, self.g.hive)
-            if back is None:
-                continue
-            if c1 + self.collect_cost + c2 <= self.energy + 1e-9:
-                if best is None or c1 < best[0]:
-                    best = (c1, f, to_f)
-        if best:
-            c1, f, path = best
-            self.target, self.plan = f, path
-            self.step_cost = c1 / max(1, len(path))
-            self.state = "To flower"
-            return
-        if self.pos != self.g.hive:
-            path, cost = self._route(self.pos, self.g.hive)
-            if path is None:
-                self.done, self.state = True, "Stuck"
-                return
-            self.target, self.plan = None, path
-            self.step_cost = cost / max(1, len(path))
-            self.state = "Returning"
-            return
-        self.done, self.state = True, "Finished"
-
-    def _arrive(self):
-        if self.target is not None and self.pos == self.target:
-            self.remaining.discard(self.pos)
-            self.collected.append(self.pos)
-            self.energy -= self.collect_cost
-            self.target = None
-            self.state = "Collecting"
-        elif self.pos == self.g.hive:
-            self.state = "At hive"
-
-    def step(self):
-        if self.done:
-            return
-        if not self.plan:
-            self._choose()
-            if self.done:
-                self.energy_hist.append(self.energy)
-                return
-            if not self.plan:  # already standing on the target
-                self._arrive()
-                self.energy_hist.append(self.energy)
-                return
-        self.pos = self.plan.pop(0)
-        self.energy -= self.step_cost
-        self.steps += 1
-        self.trail.append(self.pos)
-        if not self.plan:
-            self._arrive()
-        self.energy_hist.append(self.energy)
+# colors
+WHITE = (255, 255, 255)
+BLACK = (0, 0, 0)
+GRASS_1 = (126, 200, 80)          # two greens, drawn like a checkerboard
+GRASS_2 = (112, 188, 70)
+ROCK = (125, 125, 130)
+ROCK_LIGHT = (165, 165, 170)
+HIVE_COLOR = (235, 170, 40)
+HIVE_DARK = (170, 110, 20)
+BEE_YELLOW = (255, 205, 0)
+WING = (200, 235, 255)
+TRAIL = (255, 255, 255)
+PANEL_BG = (250, 244, 220)
+STEM = (40, 130, 40)
+FLOWER_CENTER = (255, 215, 0)
+# petal colors and size for each nectar amount (small / medium / large flower)
+FLOWER_PETALS = {5: (255, 170, 200), 10: (255, 110, 110), 20: (190, 100, 230)}
+FLOWER_RADIUS = {5: 7, 10: 9, 20: 11}
+WILTED = (200, 190, 170)          # a flower that was already collected
 
 
-# ----------------------------------------------------------------------------
-# Interactive UI
-# ----------------------------------------------------------------------------
+def run_all_strategies(env):
+    """Run every strategy on this garden and return {name: result}."""
+    matrix = build_distance_matrix(env)
+    results = {}
+    for name, strategy in STRATEGIES:
+        results[name] = strategy(env, matrix=matrix)
+    return results
+
+
 class Simulation:
-    def __init__(self, seed=START_SEED):
+    def __init__(self, seed=0):
         self.seed = seed
+        self.speed = 6                 # steps per second
+        self.paused = False
+        self.load_map(seed)
+
+    def load_map(self, seed):
+        self.seed = seed
+        self.env = BeeGarden(SIZE, SIZE, n_flowers=N_FLOWERS, seed=seed)
+        self.results = run_all_strategies(self.env)
+        self.strategy_index = 0
+        self.restart()
+
+    def restart(self):
+        name = STRATEGIES[self.strategy_index][0]
+        self.result = self.results[name]
+        self.route = self.result["route"]
+        self.step = 0                          # index in the route
+        self.energy = self.env.energy_limit
+        self.nectar = 0
+        self.collected = set()
+        self.trail = [self.route[0]]
+        self.facing = 1                        # 1 = looking right, -1 = looking left
+        self.timer = 0.0
         self.paused = False
 
-        self.fig = plt.figure(figsize=(12, 7))
-        try:
-            self.fig.canvas.manager.set_window_title("Bee Pollination Simulation")
-        except Exception:
-            pass
-        gs = GridSpec(2, 2, figure=self.fig, width_ratios=[1.3, 1], height_ratios=[1, 1],
-                      left=0.05, right=0.97, top=0.93, bottom=0.18, wspace=0.18, hspace=0.35)
-        self.ax_g = self.fig.add_subplot(gs[:, 0])
-        self.ax_e = self.fig.add_subplot(gs[0, 1])
-        self.ax_i = self.fig.add_subplot(gs[1, 1])
+    def choose_strategy(self, index):
+        self.strategy_index = index
+        self.restart()
 
-        self.btn_pause = Button(self.fig.add_axes([0.06, 0.04, 0.11, 0.06]), "Pause")
-        self.btn_restart = Button(self.fig.add_axes([0.19, 0.04, 0.11, 0.06]), "Restart")
-        self.btn_new = Button(self.fig.add_axes([0.32, 0.04, 0.14, 0.06]), "New garden")
-        self.slider = Slider(self.fig.add_axes([0.62, 0.055, 0.25, 0.03]),
-                             "Delay (ms)", 30, 800, valinit=250, valstep=10)
-        self.btn_pause.on_clicked(self.toggle_pause)
-        self.btn_restart.on_clicked(lambda _e: self.restart(new_garden=False))
-        self.btn_new.on_clicked(lambda _e: self.restart(new_garden=True))
-        self.slider.on_changed(self.set_speed)
+    def finished(self):
+        return self.step >= len(self.route) - 1
 
-        self.build(new_garden=False)
-        self.anim = FuncAnimation(self.fig, self.update, interval=250, cache_frame_data=False)
+    def move_one_step(self):
+        """Move the bee one cell on its route and update energy and nectar."""
+        if self.finished():
+            return
+        self.step += 1
+        pos = self.route[self.step]
+        dx = pos[0] - self.route[self.step - 1][0]
+        if dx != 0:
+            self.facing = 1 if dx > 0 else -1
+        self.trail.append(pos)
+        self.energy -= 1                       # every step costs 1 energy
 
-    # -- setup ---------------------------------------------------------------
-    def build(self, new_garden):
-        if new_garden:
-            self.seed = random.randrange(10_000)
-        self.garden = BeeGarden(seed=self.seed, **GARDEN_KWARGS)
-        self.flower_positions = list(self.garden.flowers)
-        self.bee = BeeAgent(self.garden)
-        self._draw_static()
-        self._draw_energy_axes()
-        self._draw_dashboard_axes()
-        self.redraw()
+        # collect nectar if this is a flower the strategy chose to visit
+        if (pos in self.env.flowers and pos in self.result["visited"]
+                and pos not in self.collected):
+            self.collected.add(pos)
+            self.energy -= self.env.collect_cost
+            self.nectar += self.env.flowers[pos]
 
-    def _draw_static(self):
-        ax, g = self.ax_g, self.garden
-        ax.clear()
-        for r in range(g.height):
-            for c in range(g.width):
-                ax.add_patch(Rectangle((c, r), 1, 1, facecolor="#f7f9f2",
-                                       edgecolor="#cbd5c0", linewidth=1))
-        for obs in g.obstacles:
-            r, c = obs
-            ax.add_patch(Rectangle((c, r), 1, 1, facecolor="#9ca3af",
-                                   edgecolor="#4b5563", linewidth=1))
-        hr, hc = g.hive
-        ax.scatter(hc + 0.5, hr + 0.5, s=320, marker="s", color="#eab308",
-                   edgecolors="#713f12", linewidths=2, zorder=4)
+    def update(self, seconds):
+        if self.paused or self.finished():
+            return
+        self.timer += seconds
+        while self.timer >= 1.0 / self.speed:
+            self.timer -= 1.0 / self.speed
+            self.move_one_step()
 
-        fx = np.array([[c + 0.5, r + 0.5] for r, c in self.flower_positions]).reshape(-1, 2)
-        self.flower_sc = ax.scatter(fx[:, 0], fx[:, 1], s=220, color="#f59e0b",
-                                    edgecolors="#b45309", linewidths=1.5, zorder=3)
-        (self.trail_line,) = ax.plot([], [], "-", color="#ef4444", alpha=0.6,
-                                     linewidth=2, zorder=2)
-        self.bee_sc = ax.scatter([], [], s=260, marker="o", color="#ef4444",
-                                 edgecolors="#7f1d1d", linewidths=1.5, zorder=5)
-        ax.set_xlim(0, g.width)
-        ax.set_ylim(g.height, 0)  # row 0 at the top
-        ax.set_aspect("equal")
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_title(f"Bee Pollination Garden (seed {self.seed})")
 
-    def _draw_energy_axes(self):
-        ax = self.ax_e
-        ax.clear()
-        ax.set_title("Energy over time")
-        ax.set_xlabel("Step")
-        ax.set_ylabel("Energy")
-        ax.set_ylim(0, self.bee.max_energy * 1.05)
-        ax.axhline(self.bee.max_energy, color="#9ca3af", linestyle="--", linewidth=1)
-        ax.grid(alpha=0.3)
-        (self.energy_line,) = ax.plot([], [], color="#16a34a", linewidth=2)
+def cell_rect(pos):
+    x, y = pos
+    return pygame.Rect(x * CELL, y * CELL, CELL, CELL)
 
-    def _draw_dashboard_axes(self):
-        ax = self.ax_i
-        ax.clear()
-        ax.set_xlim(0, 1)
-        ax.set_ylim(0, 1)
-        ax.axis("off")
-        ax.set_title("Dashboard")
-        ax.add_patch(Rectangle((0.05, 0.82), 0.9, 0.1, facecolor="#e5e7eb", edgecolor="#6b7280"))
-        self.bar_fg = Rectangle((0.05, 0.82), 0.9, 0.1, facecolor="#16a34a")
-        ax.add_patch(self.bar_fg)
-        self.info_text = ax.text(0.05, 0.75, "", va="top", family="monospace", fontsize=11)
 
-    # -- drawing -------------------------------------------------------------
-    def redraw(self):
-        g, b = self.garden, self.bee
+def draw_flower(screen, center, value, collected):
+    """A flower with a stem, 6 petals and a yellow center."""
+    cx, cy = center
+    r = FLOWER_RADIUS[value]
+    petal = WILTED if collected else FLOWER_PETALS[value]
+    middle = (150, 130, 90) if collected else FLOWER_CENTER
 
-        self.flower_sc.set_facecolors(
-            ["#86efac" if p in b.collected else "#f59e0b" for p in self.flower_positions])
-        self.trail_line.set_data([c + 0.5 for _r, c in b.trail], [r + 0.5 for r, _c in b.trail])
-        self.bee_sc.set_offsets([[b.pos[1] + 0.5, b.pos[0] + 0.5]])
+    pygame.draw.line(screen, STEM, (cx, cy), (cx, cy + 17), 3)         # stem
+    pygame.draw.ellipse(screen, STEM, (cx, cy + 9, 9, 5))              # leaf
 
-        self.energy_line.set_data(range(len(b.energy_hist)), b.energy_hist)
-        self.ax_e.set_xlim(0, max(50, len(b.energy_hist) + 5))
+    offsets = [(-1, 0), (1, 0), (-0.5, -0.87), (0.5, -0.87), (-0.5, 0.87), (0.5, 0.87)]
+    for ox, oy in offsets:
+        pygame.draw.circle(screen, petal, (int(cx + ox * r * 0.8), int(cy + oy * r * 0.8)), int(r * 0.6))
+    pygame.draw.circle(screen, middle, (cx, cy), int(r * 0.5))
 
-        energy = max(0.0, b.energy)
-        ratio = energy / b.max_energy if b.max_energy else 0.0
-        self.bar_fg.set_width(0.9 * ratio)
-        self.bar_fg.set_facecolor("#16a34a" if ratio > 0.5 else "#f59e0b" if ratio > 0.25 else "#dc2626")
-        self.info_text.set_text(
-            f"State      : {b.state}\n"
-            f"Step       : {b.steps}\n"
-            f"Energy     : {energy:.1f}/{b.max_energy:.1f}\n"
-            f"Energy used: {b.max_energy - energy:.1f}\n"
-            f"Collected  : {len(b.collected)}/{len(self.flower_positions)} flowers\n"
-            f"Remaining  : {len(b.remaining)} flowers\n"
-            f"Path length: {len(b.trail) - 1} cells"
-        )
-        self.fig.canvas.draw_idle()
 
-    # -- callbacks -----------------------------------------------------------
-    def update(self, _frame):
-        if not self.paused and not self.bee.done:
-            self.bee.step()
-            self.redraw()
+def draw_hive(screen, rect):
+    """A beehive made of 3 stacked rounded layers with a dark door."""
+    cx = rect.centerx
+    for i, width in enumerate((30, 34, 26)):
+        y = rect.bottom - 9 - i * 10
+        pygame.draw.ellipse(screen, HIVE_COLOR, (cx - width // 2, y - 6, width, 13))
+        pygame.draw.ellipse(screen, HIVE_DARK, (cx - width // 2, y - 6, width, 13), 2)
+    pygame.draw.ellipse(screen, BLACK, (cx - 4, rect.bottom - 14, 8, 8))   # door
 
-    def toggle_pause(self, _event):
-        self.paused = not self.paused
-        self.btn_pause.label.set_text("Play" if self.paused else "Pause")
-        self.fig.canvas.draw_idle()
 
-    def restart(self, new_garden):
-        self.paused = False
-        self.btn_pause.label.set_text("Pause")
-        self.build(new_garden)
+def draw_rock(screen, rect):
+    """An obstacle: a gray rock with a light spot."""
+    body = rect.inflate(-6, -12).move(0, 3)
+    pygame.draw.ellipse(screen, ROCK, body)
+    pygame.draw.ellipse(screen, ROCK_LIGHT, (body.x + 6, body.y + 4, body.width // 2, body.height // 3))
+    pygame.draw.ellipse(screen, BLACK, body, 1)
 
-    def set_speed(self, value):
-        self.anim.event_source.interval = int(value)
+
+def draw_bee(screen, center, facing):
+    """A bee: yellow body, black stripes, two wings, a head and a small stinger."""
+    cx, cy = center
+    a, b = 13, 9                                    # half width / half height of the body
+
+    # wings (a little see-through)
+    wing_surface = pygame.Surface((CELL, CELL), pygame.SRCALPHA)
+    pygame.draw.ellipse(wing_surface, WING + (200,), (8, 0, 12, 16))
+    pygame.draw.ellipse(wing_surface, WING + (200,), (18, 2, 12, 16))
+    screen.blit(wing_surface, (cx - CELL // 2, cy - CELL // 2 - 8))
+
+    # body
+    pygame.draw.ellipse(screen, BEE_YELLOW, (cx - a, cy - b, 2 * a, 2 * b))
+    for dx in (-5, 3):                              # stripes (only inside the body)
+        chord = int(b * (1 - (dx / a) ** 2) ** 0.5)
+        pygame.draw.line(screen, BLACK, (cx + dx, cy - chord), (cx + dx, cy + chord), 4)
+    pygame.draw.ellipse(screen, BLACK, (cx - a, cy - b, 2 * a, 2 * b), 2)
+
+    # head and eye on the side the bee is looking at
+    hx = cx + facing * (a + 2)
+    pygame.draw.circle(screen, BLACK, (hx, cy), 6)
+    pygame.draw.circle(screen, WHITE, (hx + facing * 2, cy - 2), 2)
+    # stinger on the other side
+    pygame.draw.polygon(screen, BLACK, [(cx - facing * a, cy - 2), (cx - facing * (a + 5), cy), (cx - facing * a, cy + 2)])
+
+
+def draw_garden(screen, sim, font):
+    env = sim.env
+
+    # grass (checkerboard of two greens)
+    for x in range(env.width):
+        for y in range(env.height):
+            color = GRASS_1 if (x + y) % 2 == 0 else GRASS_2
+            pygame.draw.rect(screen, color, cell_rect((x, y)))
+
+    # obstacles
+    for pos in env.obstacles:
+        draw_rock(screen, cell_rect(pos))
+
+    # the path the bee walked (white dots)
+    for pos in sim.trail:
+        pygame.draw.circle(screen, TRAIL, cell_rect(pos).center, 3)
+
+    # the hive
+    draw_hive(screen, cell_rect(env.hive))
+
+    # flowers, with the nectar number under each one
+    for pos, value in env.flowers.items():
+        rect = cell_rect(pos)
+        center = (rect.centerx, rect.centery - 6)
+        draw_flower(screen, center, value, pos in sim.collected)
+        text = font.render(str(value), True, WHITE)
+        shadow = font.render(str(value), True, BLACK)
+        screen.blit(shadow, (rect.right - 13, rect.bottom - 17))
+        screen.blit(text, (rect.right - 14, rect.bottom - 18))
+
+    # the bee
+    draw_bee(screen, cell_rect(sim.route[sim.step]).center, sim.facing)
+
+
+def draw_panel(screen, sim, font, big_font):
+    env = sim.env
+    x0 = env.width * CELL
+    pygame.draw.rect(screen, PANEL_BG, pygame.Rect(x0, 0, PANEL, env.height * CELL))
+
+    name = STRATEGIES[sim.strategy_index][0]
+    lines = [
+        ("Bee Pollination Agent", big_font),
+        (f"Map (seed): {sim.seed}", font),
+        ("", font),
+        (f"Strategy: {name}", big_font),
+        (f"Energy: {sim.energy} / {env.energy_limit}", font),
+        (f"Nectar: {sim.nectar}", font),
+        (f"Steps: {sim.step} / {len(sim.route) - 1}", font),
+        (f"Flowers: {len(sim.collected)} / {len(sim.result['visited'])}", font),
+        (f"Speed: {sim.speed} steps/sec", font),
+        ("", font),
+    ]
+    if sim.finished():
+        lines.append(("Back at the hive!" if sim.result["returned"] else "Did not return", big_font))
+        lines.append((f"Final nectar: {sim.result['nectar']}", font))
+    elif sim.paused:
+        lines.append(("PAUSED", big_font))
+
+    lines += [
+        ("", font),
+        ("Keys:", big_font),
+        ("1-4  choose strategy", font),
+        ("SPACE  pause / play", font),
+        ("R  restart", font),
+        ("UP/DOWN  speed", font),
+        ("N  next map", font),
+        ("ESC  quit", font),
+    ]
+
+    y = 10
+    for text, f in lines:
+        screen.blit(f.render(text, True, BLACK), (x0 + 12, y))
+        y += 24 if f is font else 30
+
+    # energy bar
+    bar = pygame.Rect(x0 + 12, env.height * CELL - 30, PANEL - 24, 16)
+    pygame.draw.rect(screen, WHITE, bar)
+    left = max(sim.energy, 0) / env.energy_limit
+    pygame.draw.rect(screen, (60, 170, 60), (bar.x, bar.y, int(bar.width * left), bar.height))
+    pygame.draw.rect(screen, BLACK, bar, 1)
+
+
+def main():
+    pygame.init()
+    sim = Simulation(seed=0)
+    width = SIZE * CELL + PANEL
+    height = SIZE * CELL
+    screen = pygame.display.set_mode((width, height))
+    pygame.display.set_caption("AI Bee Pollination Agent")
+    font = pygame.font.SysFont("arial", 16)
+    big_font = pygame.font.SysFont("arial", 18, bold=True)
+    clock = pygame.time.Clock()
+
+    running = True
+    while running:
+        seconds = clock.tick(60) / 1000.0
+
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    running = False
+                elif event.key == pygame.K_SPACE:
+                    sim.paused = not sim.paused
+                elif event.key == pygame.K_r:
+                    sim.restart()
+                elif event.key == pygame.K_UP:
+                    sim.speed = min(sim.speed + 2, 60)
+                elif event.key == pygame.K_DOWN:
+                    sim.speed = max(sim.speed - 2, 1)
+                elif event.key == pygame.K_n:
+                    sim.load_map(sim.seed + 1)
+                elif event.key in (pygame.K_1, pygame.K_2, pygame.K_3, pygame.K_4):
+                    sim.choose_strategy(event.key - pygame.K_1)
+
+        sim.update(seconds)
+        draw_garden(screen, sim, font)
+        draw_panel(screen, sim, font, big_font)
+        pygame.display.flip()
+
+    pygame.quit()
 
 
 if __name__ == "__main__":
-    sim = Simulation()
-    plt.show()
+    main()

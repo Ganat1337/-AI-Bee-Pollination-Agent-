@@ -1,112 +1,137 @@
-import os
-import sys
+"""
+gui/plots.py  -  Charts for the project (matplotlib).
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+Run from the project root (the folder that has main.py):
+    python -m gui.plots
+
+It makes 3 pictures in the results/ folder:
+    results/strategy_comparison.png   bar charts of the 5 metrics
+    results/routes_seed0.png          the route of every strategy on map 0
+    results/nectar_per_map.png        nectar of every strategy on each map
+"""
+
+import os
 
 import matplotlib.pyplot as plt
-from matplotlib.patches import Rectangle
+
+from evaluation.compare import compare_strategies
+from evaluation.metrics import METRIC_NAMES
+
+FLOWER_SIZES = {5: "small", 10: "medium", 20: "large"}
 
 
-def _finish(fig, save_path, show):
+def plot_comparison(summary, path="results/strategy_comparison.png", show=False):
+    """One small bar chart for each of the 5 metrics (average over the maps)."""
+    fig, axes = plt.subplots(2, 3, figsize=(14, 8))
+    axes = axes.flatten()
+    names = list(summary["Strategy"])
+
+    for ax, metric in zip(axes, METRIC_NAMES):
+        values = list(summary[metric])
+        ax.bar(range(len(names)), values)
+        ax.set_title(metric)
+        ax.set_xticks(range(len(names)))
+        ax.set_xticklabels(names, rotation=25, ha="right", fontsize=8)
+        for i, v in enumerate(values):
+            ax.text(i, v, str(v), ha="center", va="bottom", fontsize=8)
+
+    axes[-1].axis("off")                       # 5 metrics, so the 6th box is empty
+    fig.suptitle("Strategy comparison (average over the maps)")
     fig.tight_layout()
-    if save_path:
-        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    save_or_show(fig, path, show)
+
+
+def plot_route(env, result, title, ax):
+    """Draw the garden and the bee's route on one axis."""
+    ax.set_xlim(-0.5, env.width - 0.5)
+    ax.set_ylim(env.height - 0.5, -0.5)        # y goes down, like on the screen
+    ax.set_aspect("equal")
+    ax.set_xticks(range(env.width))
+    ax.set_yticks(range(env.height))
+    ax.tick_params(labelsize=6)
+    ax.grid(True, linewidth=0.3)
+
+    for (x, y) in env.obstacles:
+        ax.add_patch(plt.Rectangle((x - 0.5, y - 0.5), 1, 1, color="gray"))
+
+    xs = [p[0] for p in result["route"]]
+    ys = [p[1] for p in result["route"]]
+    ax.plot(xs, ys, color="orange", linewidth=2)
+
+    for (x, y), value in env.flowers.items():
+        visited = (x, y) in result["visited"]
+        ax.plot(x, y, "o", markersize=12,
+                color="purple" if visited else "lightgray")
+        ax.text(x, y, str(value), ha="center", va="center", fontsize=6, color="white")
+
+    ax.plot(env.hive[0], env.hive[1], "s", markersize=12, color="brown")
+    ax.set_title(f"{title}\nnectar {result['nectar']}, energy {result['energy_used']}",
+                 fontsize=9)
+
+
+def plot_all_routes(env, results, seed, path="results/routes_seed0.png", show=False):
+    """The routes of all strategies on the same map, side by side."""
+    names = [name for (s, name) in results if s == seed]
+    fig, axes = plt.subplots(1, len(names), figsize=(4.5 * len(names), 5))
+    if len(names) == 1:
+        axes = [axes]
+
+    for ax, name in zip(axes, names):
+        plot_route(env, results[(seed, name)], name, ax)
+
+    fig.suptitle(f"Routes on map {seed}  (purple = visited flower, gray = skipped)")
+    fig.tight_layout()
+    save_or_show(fig, path, show)
+
+
+def plot_nectar_per_map(per_map, path="results/nectar_per_map.png", show=False):
+    """Grouped bars: nectar of every strategy on every map."""
+    seeds = sorted(per_map["Seed"].unique())
+    names = list(per_map["Strategy"].unique())
+    width = 0.8 / len(names)
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    for i, name in enumerate(names):
+        values = []
+        for s in seeds:
+            row = per_map[(per_map["Seed"] == s) & (per_map["Strategy"] == name)]
+            values.append(float(row["Total Nectar Collected"].iloc[0]))
+        positions = [k + i * width for k in range(len(seeds))]
+        ax.bar(positions, values, width=width, label=name)
+
+    ax.set_xticks([k + 0.4 - width / 2 for k in range(len(seeds))])
+    ax.set_xticklabels([f"Map {s}" for s in seeds])
+    ax.set_ylabel("Total nectar")
+    ax.set_title("Nectar collected on each map")
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    save_or_show(fig, path, show)
+
+
+def save_or_show(fig, path, show):
+    if path:
+        folder = os.path.dirname(path)
+        if folder:
+            os.makedirs(folder, exist_ok=True)
+        fig.savefig(path, dpi=120)
+        print("Saved", path)
     if show:
         plt.show()
-    return fig
+    plt.close(fig)
 
 
-def plot_energy(energy_hist, max_energy=None, save_path=None, show=True):
-    """Energy of the bee at every step."""
-    fig, ax = plt.subplots(figsize=(7, 4))
-    ax.plot(range(len(energy_hist)), energy_hist, color="#16a34a", linewidth=2)
-    if max_energy is not None:
-        ax.axhline(max_energy, color="#9ca3af", linestyle="--", label="Energy limit")
-        ax.legend()
-    ax.set_title("Energy over time")
-    ax.set_xlabel("Step")
-    ax.set_ylabel("Energy")
-    ax.grid(alpha=0.3)
-    return _finish(fig, save_path, show)
+def main():
+    from environment.garden import BeeGarden
 
+    seeds = (0, 1, 2)
+    per_map, summary, results = compare_strategies(seeds=seeds, size=15, n_flowers=10)
 
-def plot_path(garden, path, collected=None, save_path=None, show=True):
-    """Garden map: obstacles, flowers, hive and the route (list of (row, col))."""
-    collected = set(collected or [])
-    fig, ax = plt.subplots(figsize=(6, 6))
+    plot_comparison(summary)
+    plot_nectar_per_map(per_map)
 
-    for r in range(garden.height):
-        for c in range(garden.width):
-            ax.add_patch(Rectangle((c, r), 1, 1, facecolor="#f7f9f2",
-                                   edgecolor="#cbd5c0", linewidth=1))
-    for r, c in garden.obstacles:
-        ax.add_patch(Rectangle((c, r), 1, 1, facecolor="#9ca3af",
-                               edgecolor="#4b5563", linewidth=1))
-
-    for r, c in garden.flowers:
-        color = "#86efac" if (r, c) in collected else "#f59e0b"
-        ax.scatter(c + 0.5, r + 0.5, s=220, color=color,
-                   edgecolors="#b45309", linewidths=1.5, zorder=3)
-
-    hr, hc = garden.hive
-    ax.scatter(hc + 0.5, hr + 0.5, s=320, marker="s", color="#eab308",
-               edgecolors="#713f12", linewidths=2, zorder=4)
-
-    if path:
-        ax.plot([c + 0.5 for _r, c in path], [r + 0.5 for r, _c in path],
-                "-", color="#ef4444", linewidth=2.5, alpha=0.8, zorder=2)
-        ax.scatter(path[-1][1] + 0.5, path[-1][0] + 0.5, s=200, color="#ef4444",
-                   edgecolors="#7f1d1d", linewidths=1.5, zorder=5)
-
-    ax.set_xlim(0, garden.width)
-    ax.set_ylim(garden.height, 0)
-    ax.set_aspect("equal")
-    ax.set_xticks([])
-    ax.set_yticks([])
-    ax.set_title("Bee path")
-    return _finish(fig, save_path, show)
-
-
-def plot_convergence(histories, ylabel="Fitness", title="Convergence",
-                     save_path=None, show=True):
-    """histories = {"Genetic": [..], "Hill climbing": [..]}"""
-    fig, ax = plt.subplots(figsize=(7, 4))
-    for name, values in histories.items():
-        ax.plot(range(len(values)), values, linewidth=2, label=name)
-    ax.set_title(title)
-    ax.set_xlabel("Iteration")
-    ax.set_ylabel(ylabel)
-    ax.grid(alpha=0.3)
-    ax.legend()
-    return _finish(fig, save_path, show)
-
-
-def plot_comparison(results, ylabel="Value", title="Comparison", save_path=None, show=True):
-    """results = {"A*": 42, "Genetic": 38, ...} -> bar chart."""
-    fig, ax = plt.subplots(figsize=(7, 4))
-    names = list(results)
-    values = [results[n] for n in names]
-    bars = ax.bar(names, values, color="#f59e0b", edgecolor="#b45309")
-    for bar, v in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(), f"{v:g}",
-                ha="center", va="bottom")
-    ax.set_title(title)
-    ax.set_ylabel(ylabel)
-    ax.grid(axis="y", alpha=0.3)
-    return _finish(fig, save_path, show)
+    env = BeeGarden(15, 15, n_flowers=10, seed=seeds[0])
+    plot_all_routes(env, results, seeds[0])
 
 
 if __name__ == "__main__":
-    from environment.garden import BeeGarden
-    from gui.simulation_ui import BeeAgent
-
-    garden = BeeGarden(width=15, height=15, n_flowers=10, seed=0)
-    bee = BeeAgent(garden)
-    while not bee.done:
-        bee.step()
-
-    plot_energy(bee.energy_hist, bee.max_energy, show=False)
-    plot_path(garden, bee.trail, bee.collected, show=False)
-    plot_comparison({"Bee (greedy A*)": len(bee.collected)},
-                    ylabel="Flowers collected", title="Flowers collected", show=False)
-    plt.show()
+    main()
