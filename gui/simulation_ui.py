@@ -20,6 +20,7 @@ import matplotlib.colors as mcolors
 import matplotlib.patheffects as pe
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.collections import LineCollection
 from matplotlib.lines import Line2D
 from matplotlib.patches import Circle, Ellipse, Polygon
 from matplotlib.widgets import Button, RadioButtons, Slider
@@ -43,24 +44,29 @@ HISTORY_INFO = {
 
 # colors of the game look
 GRASS_1 = "#7ec850"                  # two greens, like a checkerboard
-GRASS_2 = "#70bc46"
-ROCK = "#7d7d82"
-ROCK_LIGHT = "#a5a5aa"
-HIVE_COLOR = "#ebaa28"
-HIVE_DARK = "#aa6e14"
+GRASS_2 = "#72bd48"
+GRASS_TUFT = "#5aa636"
+ROCK = "#85858c"
+ROCK_DARK = "#4a4a4f"
+ROCK_LIGHT = "#b4b4ba"
+HIVE_1 = "#ebaa28"
+HIVE_2 = "#f5c850"
+HIVE_DARK = "#8c5a10"
 BEE_YELLOW = "#ffcd00"
 WING = "#c8ebff"
-STEM = "#288228"
+STEM = "#2f8a2f"
 FLOWER_CENTER = "#ffd700"
-WILTED = "#c8beaa"                   # a flower that was already collected
+WILTED = "#cfc5b0"                   # a flower that was already collected
+WILTED_EDGE = "#a89c85"
 WILTED_CENTER = "#96825a"
 FLOWER_PETALS = {5: "#ffaac8", 10: "#ff6e6e", 20: "#be64e6"}     # by nectar amount
+FLOWER_EDGES = {5: "#e07aa0", 10: "#d04646", 20: "#8e3cb4"}
 FLOWER_RADIUS = {5: 0.17, 10: 0.22, 20: 0.28}                    # bigger flower = more nectar
 PETAL_OFFSETS = [(-1, 0), (1, 0), (-0.5, -0.87), (0.5, -0.87), (-0.5, 0.87), (0.5, 0.87)]
 
 
 def draw_game_garden(ax, env):
-    """Grass, rocks (obstacles) and the beehive. Returns nothing."""
+    """Grass with little tufts, rocks (obstacles) and the beehive."""
     ax.clear()
     w, h = env.width, env.height
 
@@ -77,41 +83,70 @@ def draw_game_garden(ax, env):
     ax.set_aspect("equal")
     ax.set_xticks([])
     ax.set_yticks([])
+    for spine in ax.spines.values():                  # a dark green frame around the garden
+        spine.set_color("#3a6b2a")
+        spine.set_linewidth(3)
 
-    # obstacles are gray rocks
+    # small grass tufts (the same places every time, so the garden does not flicker)
+    rng = random.Random(7)
+    tufts = []
+    for x in range(w):
+        for y in range(h):
+            for _ in range(2):
+                tx = x + rng.uniform(-0.4, 0.4)
+                ty = y + rng.uniform(-0.3, 0.4)
+                for dx in (-0.06, 0.0, 0.06):
+                    tufts.append([(tx, ty), (tx + dx * 2, ty - 0.13)])
+    ax.add_collection(LineCollection(tufts, colors=GRASS_TUFT, linewidths=0.9, zorder=0.5))
+
+    # obstacles are rocks with a shadow, a light spot and a small crack
     for (x, y) in env.obstacles:
-        ax.add_patch(Ellipse((x, y + 0.08), 0.78, 0.6, facecolor=ROCK, edgecolor="black",
-                             linewidth=1, zorder=1))
-        ax.add_patch(Ellipse((x - 0.12, y - 0.04), 0.3, 0.16, facecolor=ROCK_LIGHT, zorder=2))
+        r = random.Random(x * 100 + y)
+        size = r.uniform(0.9, 1.08)
+        ax.add_patch(Ellipse((x + 0.05, y + 0.26), 0.82 * size, 0.2, facecolor="black",
+                             alpha=0.25, zorder=1))
+        ax.add_patch(Ellipse((x, y + 0.06), 0.82 * size, 0.64 * size, facecolor=ROCK,
+                             edgecolor=ROCK_DARK, linewidth=1.2, zorder=2))
+        ax.add_patch(Ellipse((x - 0.13, y - 0.07), 0.3 * size, 0.16, facecolor=ROCK_LIGHT, zorder=3))
+        ax.add_line(Line2D([x + 0.1, x + 0.17, x + 0.12], [y - 0.02, y + 0.08, y + 0.17],
+                           color=ROCK_DARK, linewidth=0.9, zorder=3))
 
-    # the hive: 3 stacked layers and a dark door (bottom layer first)
+    # the hive: 3 stripes of honey color, a roof and a dark door (bottom layer first)
     hx, hy = env.hive
-    for width, dy in ((0.85, 0.28), (0.95, 0.0), (0.72, -0.26)):
-        ax.add_patch(Ellipse((hx, hy + dy), width, 0.32, facecolor=HIVE_COLOR,
-                             edgecolor=HIVE_DARK, linewidth=2, zorder=4))
-    ax.add_patch(Ellipse((hx, hy + 0.3), 0.18, 0.2, facecolor="black", zorder=5))
+    ax.add_patch(Ellipse((hx, hy + 0.36), 0.95, 0.16, facecolor="black", alpha=0.25, zorder=3))
+    for i, (width, dy) in enumerate(((0.85, 0.24), (0.95, -0.02), (0.74, -0.26))):
+        ax.add_patch(Ellipse((hx, hy + dy), width, 0.32, facecolor=HIVE_1 if i % 2 == 0 else HIVE_2,
+                             edgecolor=HIVE_DARK, linewidth=1.8, zorder=4))
+    ax.add_patch(Ellipse((hx, hy - 0.42), 0.18, 0.1, facecolor=HIVE_DARK, zorder=4))
+    ax.add_patch(Ellipse((hx, hy + 0.28), 0.2, 0.22, facecolor="black", edgecolor=HIVE_DARK,
+                         linewidth=1.5, zorder=5))
 
 
 def make_flower(ax, pos, value):
-    """A flower: stem, leaf, 6 petals, a center and the nectar number."""
+    """A flower: shadow, stem, 2 leaves, 6 petals, a center and a nectar badge."""
     x, y = pos[0], pos[1] - 0.12
     r = FLOWER_RADIUS[value]
+    ax.add_patch(Ellipse((x, y + 0.45), 0.34, 0.08, facecolor="black", alpha=0.2, zorder=3))
     ax.add_line(Line2D([x, x], [y, y + 0.42], color=STEM, linewidth=3, zorder=3))
-    ax.add_patch(Ellipse((x + 0.1, y + 0.25), 0.22, 0.1, angle=-30, facecolor=STEM, zorder=3))
+    ax.add_patch(Ellipse((x + 0.11, y + 0.27), 0.22, 0.1, angle=-30, facecolor=STEM, zorder=3))
+    ax.add_patch(Ellipse((x - 0.11, y + 0.18), 0.22, 0.1, angle=30, facecolor=STEM, zorder=3))
 
     petals = []
     for ox, oy in PETAL_OFFSETS:
-        petal = Circle((x + ox * r * 0.8, y + oy * r * 0.8), r * 0.6,
-                       facecolor=FLOWER_PETALS[value], zorder=4)
+        petal = Circle((x + ox * r * 0.8, y + oy * r * 0.8), r * 0.6, facecolor=FLOWER_PETALS[value],
+                       edgecolor=FLOWER_EDGES[value], linewidth=0.8, zorder=4)
         ax.add_patch(petal)
         petals.append(petal)
-    center = Circle((x, y), r * 0.5, facecolor=FLOWER_CENTER, zorder=5)
+    center = Circle((x, y), r * 0.5, facecolor=FLOWER_CENTER, edgecolor="#b8860b",
+                    linewidth=0.8, zorder=5)
     ax.add_patch(center)
 
-    label = ax.text(pos[0] + 0.3, pos[1] + 0.33, str(value), fontsize=7, color="white",
-                    ha="center", va="center", zorder=6,
-                    path_effects=[pe.withStroke(linewidth=2, foreground="black")])
-    return {"pos": pos, "value": value, "petals": petals, "center": center, "label": label}
+    # nectar amount in a small white badge
+    ax.add_patch(Circle((pos[0] + 0.3, pos[1] + 0.32), 0.14, facecolor="white", edgecolor="black",
+                        linewidth=1, zorder=6))
+    ax.text(pos[0] + 0.3, pos[1] + 0.32, str(value), fontsize=6, fontweight="bold", color="black",
+            ha="center", va="center", zorder=7)
+    return {"pos": pos, "value": value, "petals": petals, "center": center}
 
 
 class BeeApp:
@@ -212,19 +247,27 @@ class BeeApp:
         draw_game_garden(ax, self.env)
 
         # the white dots show where the bee has already been
-        self.trail, = ax.plot([], [], "o", color="white", markersize=4, zorder=3)
+        self.trail, = ax.plot([], [], "o", color="white", markersize=4, alpha=0.85, zorder=3)
 
         self.flowers = [make_flower(ax, pos, value) for pos, value in self.env.flowers.items()]
 
-        # the bee: wings, body, 2 stripes, head, eye and a small stinger
+        # a yellow dashed ring around the place the bee is flying to
+        self.target_ring = Circle((0, 0), 0.5, fill=False, edgecolor="#fff176", linewidth=2.5,
+                                  linestyle="--", zorder=9)
+        ax.add_patch(self.target_ring)
+
+        # the bee: shadow, wings, body, 2 stripes, head, eye, 2 antennae and a stinger
         self.bee = {
-            "wing1": Ellipse((0, 0), 0.26, 0.4, facecolor=WING, edgecolor="#88aabb", alpha=0.85, zorder=6),
-            "wing2": Ellipse((0, 0), 0.26, 0.4, facecolor=WING, edgecolor="#88aabb", alpha=0.85, zorder=6),
-            "body": Ellipse((0, 0), 0.66, 0.46, facecolor=BEE_YELLOW, edgecolor="black", linewidth=1.5, zorder=7),
-            "stripe1": Line2D([], [], color="black", linewidth=3, zorder=8),
-            "stripe2": Line2D([], [], color="black", linewidth=3, zorder=8),
-            "head": Circle((0, 0), 0.15, facecolor="black", zorder=8),
-            "eye": Circle((0, 0), 0.045, facecolor="white", zorder=9),
+            "shadow": Ellipse((0, 0), 0.6, 0.12, facecolor="black", alpha=0.25, zorder=6),
+            "wing1": Ellipse((0, 0), 0.3, 0.44, facecolor=WING, edgecolor="#88aabb", alpha=0.85, zorder=6),
+            "wing2": Ellipse((0, 0), 0.3, 0.44, facecolor=WING, edgecolor="#88aabb", alpha=0.85, zorder=6),
+            "body": Ellipse((0, 0), 0.76, 0.52, facecolor=BEE_YELLOW, edgecolor="black", linewidth=1.5, zorder=7),
+            "stripe1": Line2D([], [], color="black", linewidth=3.5, zorder=8),
+            "stripe2": Line2D([], [], color="black", linewidth=3.5, zorder=8),
+            "ant1": Line2D([], [], color="black", linewidth=1.2, zorder=8),
+            "ant2": Line2D([], [], color="black", linewidth=1.2, zorder=8),
+            "head": Circle((0, 0), 0.17, facecolor="black", zorder=8),
+            "eye": Circle((0, 0), 0.05, facecolor="white", zorder=9),
             "sting": Polygon(np.zeros((3, 2)), closed=True, facecolor="black", zorder=7),
         }
         for part in self.bee.values():
@@ -239,18 +282,24 @@ class BeeApp:
             dx = self.states[i]["pos"][0] - self.states[i - 1]["pos"][0]
             self.facings.append(1 if dx > 0 else -1 if dx < 0 else self.facings[-1])
 
-    def place_bee(self, x, y, f):
+    def place_bee(self, x, y, f, flap):
         """Move all the parts of the bee to the cell (x, y). f = which way it looks."""
         b = self.bee
-        b["wing1"].set_center((x - 0.08, y - 0.3))
-        b["wing2"].set_center((x + 0.1, y - 0.28))
+        b["shadow"].set_center((x, y + 0.4))
+        tilt = 25 if flap else -10                          # the wings move a little each step
+        b["wing1"].set_center((x - 0.1, y - 0.33))
+        b["wing1"].angle = tilt
+        b["wing2"].set_center((x + 0.12, y - 0.31))
+        b["wing2"].angle = -tilt
         b["body"].set_center((x, y))
-        for line, dx in ((b["stripe1"], -0.12), (b["stripe2"], 0.07)):
-            chord = 0.23 * (1 - (dx / 0.33) ** 2) ** 0.5       # stripe stays inside the body
+        for line, dx in ((b["stripe1"], -0.14), (b["stripe2"], 0.08)):
+            chord = 0.26 * (1 - (dx / 0.38) ** 2) ** 0.5     # stripe stays inside the body
             line.set_data([x + dx, x + dx], [y - chord, y + chord])
-        b["head"].set_center((x + f * 0.37, y))
-        b["eye"].set_center((x + f * 0.41, y - 0.05))
-        b["sting"].set_xy([(x - f * 0.33, y - 0.05), (x - f * 0.46, y), (x - f * 0.33, y + 0.05)])
+        b["head"].set_center((x + f * 0.42, y))
+        b["eye"].set_center((x + f * 0.46, y - 0.05))
+        b["ant1"].set_data([x + f * 0.46, x + f * 0.58], [y - 0.13, y - 0.32])
+        b["ant2"].set_data([x + f * 0.5, x + f * 0.68], [y - 0.1, y - 0.22])
+        b["sting"].set_xy([(x - f * 0.38, y - 0.05), (x - f * 0.52, y), (x - f * 0.38, y + 0.05)])
 
     def setup_energy_chart(self):
         ax = self.ax_energy
@@ -309,8 +358,15 @@ class BeeApp:
             collected = flower["pos"] in state["collected"]
             for petal in flower["petals"]:
                 petal.set_facecolor(WILTED if collected else FLOWER_PETALS[flower["value"]])
+                petal.set_edgecolor(WILTED_EDGE if collected else FLOWER_EDGES[flower["value"]])
             flower["center"].set_facecolor(WILTED_CENTER if collected else FLOWER_CENTER)
-        self.place_bee(state["pos"][0], state["pos"][1], self.facings[self.step])
+        self.place_bee(state["pos"][0], state["pos"][1], self.facings[self.step], self.step % 2 == 0)
+
+        # the ring: next flower on the list, or the hive when all are collected
+        todo = [f for f in self.result.get("order", self.result["visited"]) if f not in state["collected"]]
+        goal = todo[0] if todo else env.hive
+        self.target_ring.set_center(goal)
+        self.target_ring.set_visible(self.step < len(self.states) - 1)
         self.ax_garden.set_title(f"Bee Pollination Garden (seed {self.seed})  -  {self.name}",
                                  fontsize=12)
 
