@@ -1,334 +1,182 @@
 """
-gui/plots.py  -  Drawing helpers + comparison charts (matplotlib).
-
-This file has 3 jobs:
-    1. run_everything(env)   runs the 4 strategies + the exact "Optimal" answer
-    2. show_comparison(...)  one window that compares all of them
-    3. helpers that gui/simulation_ui.py also uses (colors, garden drawing, energy)
-
-Run from the project root (the folder that has main.py):
-    python -m gui.plots            (garden seed 0)
-    python -m gui.plots 5          (garden seed 5)
+gui/plots.py - Game-styled Matplotlib visualizations for the Bee Garden,
+training/optimization curves, and multi-strategy benchmark comparisons.
 """
 
-import os
-import sys
-import time
-
 import matplotlib.pyplot as plt
-
-from environment.garden import BeeGarden
-from search.astar import build_distance_matrix
-from optimization import hill_climbing_strategy, genetic_algorithm_strategy
-from learning.q_learning import q_learning_strategy
-from evaluation.search_based import search_based_strategy
-
-SIZE = 15
-N_FLOWERS = 10
-
-# (name, function) - same order as evaluation/compare.py
-STRATEGIES = [
-    ("A* + Nearest Flower", search_based_strategy),
-    ("Hill Climbing", hill_climbing_strategy),
-    ("Genetic Algorithm", genetic_algorithm_strategy),
-    ("Q-Learning", q_learning_strategy),
-]
-OPTIMAL = "Optimal (exact)"          # the best possible answer (see optimal_solution)
-
-COLORS = {
-    "A* + Nearest Flower": "#1f77b4",
-    "Hill Climbing": "#ff7f0e",
-    "Genetic Algorithm": "#2ca02c",
-    "Q-Learning": "#9467bd",
-    OPTIMAL: "#d4a017",
-}
-SHORT = {
-    "A* + Nearest Flower": "A*",
-    "Hill Climbing": "Hill\nClimbing",
-    "Genetic Algorithm": "Genetic",
-    "Q-Learning": "Q-Learning",
-    OPTIMAL: "Optimal",
-}
+import matplotlib.patches as patches
+import numpy as np
 
 
-# ----------------------------------------------------------------------
-# 1. Running the strategies
-# ----------------------------------------------------------------------
-def optimal_solution(env, matrix):
-    """
-    The best possible answer, found by checking every possible set of flowers.
-    (This is a DP over subsets: "cost[group][last]" = the least energy needed to
-    collect that group of flowers and end at the flower "last".)
-    The bee must be able to come home, and we keep the group with the most nectar.
-    It is only fast for a small number of flowers (like our 10).
-    """
-    start = time.perf_counter()
-    flowers = list(env.flowers)
-    n = len(flowers)
-    if n > 14:
-        return None
-    collect = env.collect_cost
-    hive = env.hive
-    limit = env.energy_limit
+def plot_garden_route(env, route=None, visited=None, title="Bee Meadow Garden"):
+    """Draw the garden with grass tiles, grey rocks, blooming flowers, hive, and route."""
+    fig, ax = plt.subplots(figsize=(8, 8))
+    fig.patch.set_facecolor("#163024")
+    ax.set_facecolor("#4fa844")
 
-    INF = float("inf")
-    cost = {}                                   # (group, last) -> least energy
-    parent = {}                                 # (group, last) -> the flower before it
-    for j in range(n):
-        cost[(1 << j, j)] = matrix[(hive, flowers[j])][1] + collect
-
-    for group in range(1, 1 << n):
-        for last in range(n):
-            here = cost.get((group, last), INF)
-            if here == INF:
-                continue
-            for nxt in range(n):
-                if group & (1 << nxt):
-                    continue
-                new_group = group | (1 << nxt)
-                new_cost = here + matrix[(flowers[last], flowers[nxt])][1] + collect
-                if new_cost < cost.get((new_group, nxt), INF):
-                    cost[(new_group, nxt)] = new_cost
-                    parent[(new_group, nxt)] = last
-
-    best = (0, 0, None, None)                   # (nectar, -energy, group, last)
-    for (group, last), c in cost.items():
-        if c + matrix[(flowers[last], hive)][1] > limit:
-            continue                            # could not come back home
-        nectar = sum(env.flowers[flowers[k]] for k in range(n) if group & (1 << k))
-        if (nectar, -c) > best[:2]:
-            best = (nectar, -c, group, last)
-
-    order = []                                  # rebuild the visiting order
-    group, last = best[2], best[3]
-    while group:
-        order.append(flowers[last])
-        previous = parent.get((group, last))
-        group &= ~(1 << last)
-        last = previous
-    order.reverse()
-
-    stops = [hive] + order + [hive]
-    route = [hive]
-    for a, b in zip(stops, stops[1:]):
-        route.extend(matrix[(a, b)][0][1:])
-
-    distance = len(route) - 1
-    return {
-        "nectar": best[0],
-        "distance": distance,
-        "energy_used": distance + collect * len(order),
-        "returned": True,
-        "visited": list(order),
-        "order": list(order),
-        "route": route,
-        "history": [],
-        "seconds": time.perf_counter() - start,
-    }
-
-
-def run_everything(env):
-    """Run the 4 strategies and the optimal answer. Returns {name: result}."""
-    matrix = build_distance_matrix(env)
-    results = {}
-    for name, strategy in STRATEGIES:
-        results[name] = strategy(env, matrix=matrix)
-    best = optimal_solution(env, matrix)
-    if best is not None:
-        results[OPTIMAL] = best
-    return results
-
-
-def best_strategy(results):
-    """The best of the 4 strategies: most nectar, then least energy, then fastest."""
-    names = [name for name, _ in STRATEGIES if name in results]
-    return min(names, key=lambda n: (-results[n]["nectar"],
-                                     results[n]["energy_used"],
-                                     results[n]["seconds"]))
-
-
-# ----------------------------------------------------------------------
-# 2. Energy step by step (used by the animation)
-# ----------------------------------------------------------------------
-def energy_profile(env, result):
-    """
-    Walk along the route and write down the state after every step:
-    every step costs 1 energy, collecting nectar costs 2 more.
-    """
-    route = result["route"]
-    planned = set(result["visited"])
-    energy = env.energy_limit
-    nectar = 0
-    done = set()
-
-    states = [{"pos": route[0], "energy": energy, "nectar": 0,
-               "collected": frozenset(), "just": False}]
-    for pos in route[1:]:
-        energy -= 1
-        just = False
-        if pos in planned and pos not in done:
-            done.add(pos)
-            energy -= env.collect_cost
-            nectar += env.flowers[pos]
-            just = True
-        states.append({"pos": pos, "energy": energy, "nectar": nectar,
-                       "collected": frozenset(done), "just": just})
-    return states
-
-
-# ----------------------------------------------------------------------
-# 3. Drawing the garden (same look in the animation and in the comparison)
-# ----------------------------------------------------------------------
-def draw_garden_base(ax, env):
-    """Empty garden: white grid, gray obstacles and the yellow hive."""
-    ax.set_facecolor("#f8f8f4")
     ax.set_xlim(-0.5, env.width - 0.5)
-    ax.set_ylim(env.height - 0.5, -0.5)         # y grows downward, like a screen
+    ax.set_ylim(env.height - 0.5, -0.5)
+    ax.set_xticks(range(env.width))
+    ax.set_yticks(range(env.height))
+    ax.tick_params(colors="#d6e8d5", labelsize=9)
     ax.set_aspect("equal")
-    ax.set_xticks([i - 0.5 for i in range(env.width + 1)])
-    ax.set_yticks([i - 0.5 for i in range(env.height + 1)])
-    ax.set_xticklabels([])
-    ax.set_yticklabels([])
-    ax.tick_params(length=0)
-    ax.grid(True, color="#d5dccb", linewidth=0.8)
+    ax.set_title(title, color="#fef3c7", fontsize=13, fontweight="bold", pad=12)
 
-    for (x, y) in env.obstacles:
-        ax.add_patch(plt.Rectangle((x - 0.5, y - 0.5), 1, 1, color="#9a9fb5", zorder=1))
+    # Checkerboard meadow grass tiles
+    for x in range(env.width):
+        for y in range(env.height):
+            color = "#5cb850" if (x + y) % 2 == 0 else "#4fa844"
+            rect = patches.Rectangle(
+                (x - 0.5, y - 0.5), 1, 1,
+                facecolor=color, edgecolor="#439339", linewidth=0.5, zorder=0
+            )
+            ax.add_patch(rect)
 
+    # Grey boulders (obstacles)
+    for ox, oy in env.obstacles:
+        rock = patches.RegularPolygon(
+            (ox, oy), numVertices=7, radius=0.38,
+            orientation=0.2, facecolor="#8b929a", edgecolor="#454a52", linewidth=1.2, zorder=2
+        )
+        ax.add_patch(rock)
+        highlight = patches.RegularPolygon(
+            (ox - 0.06, oy - 0.08), numVertices=5, radius=0.18,
+            facecolor="#bcc3cc", edgecolor="none", zorder=2.1
+        )
+        ax.add_patch(highlight)
+
+    # Planned / flown route
+    if route:
+        rx = [p[0] for p in route]
+        ry = [p[1] for p in route]
+        ax.plot(rx, ry, color="#78350f", linewidth=4.5, alpha=0.35, zorder=2.5)
+        ax.plot(rx, ry, color="#fef08a", linewidth=2.2, linestyle="--", zorder=2.6, label="Flight Route")
+
+    # Blooming flowers
+    visited_set = set(visited or [])
+    for (fx, fy), nectar in env.flowers.items():
+        if nectar >= 20:
+            petal_color, center_color, rad = "#e11d48", "#7f1d1d", 0.36
+        elif nectar >= 10:
+            petal_color, center_color, rad = "#f97316", "#7c2d12", 0.31
+        else:
+            petal_color, center_color, rad = "#fde047", "#d97706", 0.27
+
+        if (fx, fy) in visited_set:
+            ring = patches.Circle((fx, fy), rad + 0.09, fill=False, edgecolor="#fef08a", linewidth=2, zorder=3)
+            ax.add_patch(ring)
+
+        # Petals
+        n_petals = 8 if nectar >= 20 else (7 if nectar >= 10 else 6)
+        for i in range(n_petals):
+            ang = 2 * np.pi * i / n_petals
+            px = fx + np.cos(ang) * rad * 0.55
+            py = fy + np.sin(ang) * rad * 0.55
+            petal = patches.Circle((px, py), rad * 0.42, facecolor=petal_color, edgecolor="#451a03", linewidth=0.5, zorder=3.2)
+            ax.add_patch(petal)
+
+        center = patches.Circle((fx, fy), rad * 0.48, facecolor=center_color, edgecolor="#fffbeb", linewidth=0.7, zorder=3.5)
+        ax.add_patch(center)
+        ax.text(fx, fy, str(nectar), ha="center", va="center", color="white", fontsize=8, fontweight="bold", zorder=4)
+
+    # Hive at (0, 0)
     hx, hy = env.hive
-    ax.add_patch(plt.Rectangle((hx - 0.35, hy - 0.35), 0.7, 0.7, facecolor="#e8b000",
-                               edgecolor="#6b4a00", linewidth=2, zorder=4))
+    hive = patches.RegularPolygon(
+        (hx, hy), numVertices=6, radius=0.4,
+        facecolor="#f59e0b", edgecolor="#78350f", linewidth=1.5, zorder=4.5, label="Hive (0,0)"
+    )
+    ax.add_patch(hive)
+    ax.text(hx, hy, "H", ha="center", va="center", color="#451a03", fontsize=9, fontweight="bold", zorder=5)
 
+    for spine in ax.spines.values():
+        spine.set_edgecolor("#6f4a2e")
+        spine.set_linewidth(4)
 
-def draw_route_map(ax, env, result, title):
-    """Garden + the route of one strategy (green flower = visited, orange = skipped)."""
-    draw_garden_base(ax, env)
-    xs = [p[0] for p in result["route"]]
-    ys = [p[1] for p in result["route"]]
-    ax.plot(xs, ys, color="#e88080", linewidth=2, zorder=2)
-
-    for (x, y), value in env.flowers.items():
-        visited = (x, y) in result["visited"]
-        ax.scatter([x], [y], s=110, zorder=3, linewidths=1.2,
-                   facecolors="#90e0a0" if visited else "#f59e0b",
-                   edgecolors="#a05a00")
-    ax.set_title(title, fontsize=9)
-
-
-# ----------------------------------------------------------------------
-# 4. The comparison window
-# ----------------------------------------------------------------------
-def show_comparison(env, results, seed, save_path=None):
-    """
-    Top row   : bar charts of the metrics (the best of the 4 has a thick border)
-    Bottom row: the route of every strategy on the same garden
-    Returns the figure.
-    """
-    names = [n for n in list(COLORS) if n in results]
-    best = best_strategy(results)
-    optimal = results.get(OPTIMAL)
-
-    fig = plt.figure(figsize=(17, 9))
-    outer = fig.add_gridspec(2, 1, height_ratios=[1, 1.15], hspace=0.4,
-                             left=0.04, right=0.98, top=0.88, bottom=0.04)
-    top = outer[0].subgridspec(1, 4, wspace=0.3)
-    bottom = outer[1].subgridspec(1, len(names), wspace=0.08)
-
-    metrics = [
-        ("Total Nectar (higher is better)", "nectar"),
-        ("Energy Used (lower is better)", "energy_used"),
-        ("Travel Distance (lower is better)", "distance"),
-        ("Execution Time in seconds", "seconds"),
-    ]
-    for i, (title, key) in enumerate(metrics):
-        ax = fig.add_subplot(top[0, i])
-        values = [results[n][key] for n in names]
-        bars = ax.bar(range(len(names)), values, color=[COLORS[n] for n in names])
-        for bar, n in zip(bars, names):
-            if n == best:
-                bar.set_edgecolor("black")
-                bar.set_linewidth(3)
-        for x, v in enumerate(values):
-            label = f"{v:.3f}" if key == "seconds" else f"{v:g}"
-            ax.text(x, v, label, ha="center", va="bottom", fontsize=8)
-        ax.set_xticks(range(len(names)))
-        ax.set_xticklabels([SHORT[n] for n in names], fontsize=8)
-        ax.set_title(title, fontsize=10)
-        ax.margins(y=0.15)
-
-    for i, n in enumerate(names):
-        ax = fig.add_subplot(bottom[0, i])
-        r = results[n]
-        tag = "  (BEST of the 4)" if n == best else ""
-        draw_route_map(ax, env, r,
-                       f"{n}{tag}\nnectar {r['nectar']}  |  energy {r['energy_used']}"
-                       f"  |  flowers {len(r['visited'])}")
-
-    text = f"Comparison on garden (seed {seed})   -   best of the 4: {best} with {results[best]['nectar']} nectar"
-    if optimal is not None:
-        gap = optimal["nectar"] - results[best]["nectar"]
-        text += f"   -   optimal answer: {optimal['nectar']} nectar (gap = {gap})"
-    fig.suptitle(text, fontsize=13)
-
-    if save_path:
-        folder = os.path.dirname(save_path)
-        if folder:
-            os.makedirs(folder, exist_ok=True)
-        fig.savefig(save_path, dpi=110)
-        print("Saved", save_path)
-    return fig
-
-
-def plot_all_maps(seeds=(0, 1, 2), save_path=None):
-    """Nectar of every strategy on several maps, plus the average."""
-    table = {}                                   # name -> list of nectar (one per map)
-    for seed in seeds:
-        env = BeeGarden(SIZE, SIZE, n_flowers=N_FLOWERS, seed=seed)
-        results = run_everything(env)
-        for name, r in results.items():
-            table.setdefault(name, []).append(r["nectar"])
-
-    names = list(table)
-    groups = [f"Map {s}" for s in seeds] + ["Average"]
-    width = 0.8 / len(names)
-
-    fig, ax = plt.subplots(figsize=(10, 5.5))
-    for i, name in enumerate(names):
-        values = table[name] + [sum(table[name]) / len(table[name])]
-        positions = [k + i * width for k in range(len(groups))]
-        bars = ax.bar(positions, values, width=width, label=name, color=COLORS[name])
-        for p, v in zip(positions, values):
-            ax.text(p, v, f"{v:.0f}", ha="center", va="bottom", fontsize=7)
-
-    ax.set_xticks([k + 0.4 - width / 2 for k in range(len(groups))])
-    ax.set_xticklabels(groups)
-    ax.set_ylabel("Total nectar")
-    ax.set_title("Nectar collected on each map (Optimal = the best possible)")
-    ax.legend(fontsize=8)
-    fig.tight_layout()
-
-    if save_path:
-        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
-        fig.savefig(save_path, dpi=110)
-        print("Saved", save_path)
-    return fig
-
-
-def main():
-    seed = int(sys.argv[1]) if len(sys.argv) > 1 else 0
-    env = BeeGarden(SIZE, SIZE, n_flowers=N_FLOWERS, seed=seed)
-    results = run_everything(env)
-
-    print(f"\nGarden seed {seed}")
-    for name, r in results.items():
-        print(f"{name:22s} nectar {r['nectar']:3d} | energy {r['energy_used']:3d} | "
-              f"distance {r['distance']:3d} | time {r['seconds']:.4f}s")
-    print("Best of the 4:", best_strategy(results))
-
-    show_comparison(env, results, seed, save_path=f"results/comparison_seed{seed}.png")
-    plot_all_maps(save_path="results/nectar_all_maps.png")
+    plt.tight_layout()
     plt.show()
 
 
+def plot_training_curve(
+    history,
+    title="Training Progress",
+    xlabel="Episode / Iteration",
+    ylabel="Score / Fitness",
+    window=None,
+    path=None,
+    show=True,
+):
+    """Plot Q-Learning reward curve (with moving average) or Hill Climbing / GA fitness history."""
+    if not history:
+        return
+
+    fig, ax = plt.subplots(figsize=(8.5, 4.5))
+    fig.patch.set_facecolor("#fffcf4")
+    ax.set_facecolor("#fffcf4")
+
+    if window and window > 1:
+        avg = []
+        for i in range(len(history)):
+            chunk = history[max(0, i - window + 1): i + 1]
+            avg.append(sum(chunk) / len(chunk))
+        ax.plot(history, color="#16a34a", alpha=0.28, linewidth=1.1, label="Episode Score")
+        ax.plot(avg, color="#d97706", linewidth=2.3, label=f"Moving Avg ({window})")
+    else:
+        ax.plot(history, color="#d97706", linewidth=2.2, label="Best Fitness")
+
+    ax.set_title(title, color="#3b2a1a", fontweight="bold")
+    ax.set_xlabel(xlabel, color="#5c4732")
+    ax.set_ylabel(ylabel, color="#5c4732")
+    ax.grid(alpha=0.25, color="#cbb99d")
+    ax.legend(frameon=True, facecolor="#fffcf4", edgecolor="#cbb99d")
+
+    plt.tight_layout()
+    if path:
+        plt.savefig(path, dpi=150)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def plot_strategy_comparison(summary_df, path=None, show=True):
+    """Bar chart comparing Total Nectar, Travel Distance, and Energy across strategies."""
+    strategies = summary_df["Strategy"].tolist()
+    nectar = summary_df["Total Nectar Collected"].tolist()
+    distance = summary_df["Travel Distance"].tolist()
+    energy = summary_df["Energy Consumption"].tolist()
+
+    x = np.arange(len(strategies))
+    w = 0.25
+
+    fig, ax = plt.subplots(figsize=(9.5, 4.8))
+    fig.patch.set_facecolor("#fffcf4")
+    ax.set_facecolor("#fffcf4")
+
+    ax.bar(x - w, nectar, width=w, color="#f59e0b", edgecolor="#78350f", label="Avg Nectar")
+    ax.bar(x, distance, width=w, color="#16a34a", edgecolor="#14532d", label="Avg Distance")
+    ax.bar(x + w, energy, width=w, color="#64748b", edgecolor="#334155", label="Avg Energy")
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(strategies, rotation=10, ha="right", color="#3b2a1a", fontweight="bold")
+    ax.set_ylabel("Value", color="#5c4732")
+    ax.set_title("Strategy Leaderboard Comparison", color="#3b2a1a", fontweight="bold")
+    ax.grid(axis="y", alpha=0.25, color="#cbb99d")
+    ax.legend(frameon=True, facecolor="#fffcf4", edgecolor="#cbb99d")
+
+    plt.tight_layout()
+    if path:
+        plt.savefig(path, dpi=150)
+    if show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
 if __name__ == "__main__":
-    main()
+    from environment.garden import BeeGarden
+    from learning.q_learning import q_learning_strategy
+
+    env = BeeGarden(15, 15, n_flowers=10, seed=0)
+    res = q_learning_strategy(env)
+    plot_garden_route(env, route=res["route"], visited=res["visited"], title="Q-Learning Route (Seed 0)")
+    plot_training_curve(res["history"], title="Q-Learning Curve", window=100)
